@@ -1,0 +1,60 @@
+diff --git a/nvdiffrast/torch/ops.py b/nvdiffrast/torch/ops.py
+index f366c02..6f94c52 100644
+--- a/nvdiffrast/torch/ops.py
++++ b/nvdiffrast/torch/ops.py
+@@ -10,6 +10,7 @@ import importlib
+ import logging
+ import numpy as np
+ import os
++import sys
+ import torch
+ import torch.utils.cpp_extension
+ 
+@@ -90,8 +91,12 @@ def _get_plugin(gl=False):
+             'torch_antialias.cpp',
+         ]
+ 
+-    # Some containers set this to contain old architectures that won't compile. We only need the one installed in the machine.
+-    os.environ['TORCH_CUDA_ARCH_LIST'] = ''
++    # LAM_COMPAT_PLUGIN_LOAD: keep an explicit TORCH_CUDA_ARCH_LIST.
++    # Clearing it discarded a caller pin such as 12.0 (Blackwell sm_120) and
++    # made PyTorch autodetect, which also appends +PTX and lengthens the JIT
++    # compile. An empty value is removed so PyTorch can see the visible GPU.
++    if not os.environ.get('TORCH_CUDA_ARCH_LIST', '').strip():
++        os.environ.pop('TORCH_CUDA_ARCH_LIST', None)
+ 
+     # On Linux, show a warning if GLEW is being forcibly loaded when compiling the GL plugin.
+     if gl and (os.name == 'posix') and ('libGLEW' in os.environ.get('LD_PRELOAD', '')):
+@@ -121,11 +126,28 @@ def _get_plugin(gl=False):
+             pass
+ 
+     # Compile and load.
++    # LAM_COMPAT_PLUGIN_LOAD: on torch 2.11.0+cu130 the G4 run reached this
++    # import and raised ModuleNotFoundError: nvdiffrast_plugin after load()
++    # had returned (about 39s, so nvcc had run). torch 2.11 _jit_compile
++    # returns that module object. When ExtensionVersioner bumps past 0 it
++    # also renames the extension to "<name>_vN", which import_module() of
++    # the unversioned plugin_name cannot see. Keep the returned module.
++    # Compiler and loader exceptions propagate; there is no fallback rasterizer.
+     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
+-    torch.utils.cpp_extension.load(name=plugin_name, sources=source_paths, extra_cflags=common_opts+cc_opts, extra_cuda_cflags=common_opts+['-lineinfo'], extra_ldflags=ldflags, with_cuda=True, verbose=False)
+-
+-    # Import, cache, and return the compiled module.
+-    _cached_plugin[gl] = importlib.import_module(plugin_name)
++    verbose_env = os.environ.get('NVDIFFRAST_VERBOSE', '')
++    verbose = verbose_env.strip().lower() in ('1', 'true', 'yes')
++    module = torch.utils.cpp_extension.load(name=plugin_name, sources=source_paths, extra_cflags=common_opts+cc_opts, extra_cuda_cflags=common_opts+['-lineinfo'], extra_ldflags=ldflags, with_cuda=True, verbose=verbose)
++    if module is None:
++        module = importlib.import_module(plugin_name)
++    else:
++        sys.modules[plugin_name] = module
++    required = 'RasterizeGLStateWrapper' if gl else 'RasterizeCRStateWrapper'
++    if not hasattr(module, required):
++        raise RuntimeError(
++            'nvdiffrast plugin %s has no %s after compilation. '
++            'Refusing to continue without the backface-culling CUDA plugin.'
++            % (plugin_name, required))
++    _cached_plugin[gl] = module
+     return _cached_plugin[gl]
+ 
+ #----------------------------------------------------------------------------
