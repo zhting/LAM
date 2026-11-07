@@ -6,7 +6,8 @@
 #   numpy-2.4.6-cp313-cp313-manylinux_2_27_x86_64
 #   Cython-3.0.12-cp313-cp313-manylinux_2_17_x86_64
 #   setuptools-80.10.2-py3-none-any
-# torch 2.11.0+cu130 is reused from the base environment (not on PyPI).
+# torch is reused from the base environment and is not pinned here.
+# Observed on G4: 2.11.0+cu130, then 2.14.1+cu130. Do not downgrade.
 
 numpy==2.4.6
 Cython==3.0.12

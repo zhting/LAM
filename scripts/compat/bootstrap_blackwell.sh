@@ -48,6 +48,25 @@ PY="$VENV/bin/python"
 log "installing pinned build tools from constraints"
 "$PY" -m pip install -c "$CONSTRAINTS" numpy==2.4.6 'Cython==3.0.12' 'setuptools==80.10.2' 'ninja==1.13.2' \
   >"$REPORT/constraints_install.log" 2>&1
+install_runtime() {
+  local site
+  site=$("$PY" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+  cp "$ROOT/scripts/compat/lam_runtime.py" "$site/lam_runtime.py"
+  printf '%s\n' 'import lam_runtime' > "$site/lam_runtime.pth"
+  # Absolute interpreter, PATH deliberately without the venv bin directory.
+  PATH="/usr/bin:/bin" "$PY" - << 'PY'
+import lam_runtime, os, subprocess, sys
+resolved = lam_runtime.require_ninja()
+subprocess.check_output(["ninja", "--version"])
+child = subprocess.check_output([sys.executable, "-c", "import os; print(os.environ['PATH'])"], text=True)
+folder = os.path.dirname(resolved)
+if folder not in child.split(os.pathsep):
+    raise SystemExit("ninja directory was not inherited by a child process: " + child)
+print("ninja_visible", resolved)
+PY
+}
+log "installing runtime hook into the venv"
+install_runtime >"$REPORT/runtime_hook.log" 2>&1
 
 if [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]]; then
   DETECTED=$("$PY" -c 'import torch
@@ -88,6 +107,7 @@ ops = (Path(nvdiffrast.__file__).resolve().parent / "torch" / "ops.py").read_tex
 loader = ops.split("def _get_plugin", 1)[1].split("def get_log_level", 1)[0]
 assert "sys.modules[plugin_name] = module" in loader
 assert "module = torch.utils.cpp_extension.load(" in loader
+assert "_ensure_ninja_on_subprocess_path()" in loader
 assert "except Exception" not in loader
 assert "os.environ['TORCH_CUDA_ARCH_LIST'] = ''" not in loader
 print("nvdiffrast_package", nvdiffrast.__version__)

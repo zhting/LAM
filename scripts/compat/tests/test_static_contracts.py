@@ -44,6 +44,10 @@ def main():
     check("patch_publishes_module", "sys.modules[plugin_name] = module" in patch, "loader")
     check("patch_does_not_swallow", "except Exception" not in patch, "loader")
     check("patch_does_not_touch_culling", "EnableBackfaceCulling" not in patch and "rasterize_gl.cpp" not in patch, "culling sources unchanged")
+    check("patch_publishes_ninja", "_ensure_ninja_on_subprocess_path()" in patch and "LAM_NINJA" in patch, "ninja discovery")
+    cpp = (ROOT / "scripts/compat/patches/pytorch3d-e4ad6e5-cpp20.patch").read_text()
+    check("pytorch3d_patch_is_setup_only", cpp.count("diff --git ") == 1 and "a/setup.py" in cpp, "cpp20 patch")
+    check("pytorch3d_patch_upgrades_both_standards", cpp.count("-std=c++20") >= 2 and "-std=c++17" in cpp, "host and nvcc")
     wrapper = (ROOT / "external/landmark_detection/FaceBoxesV2/utils/nms_wrapper.py").read_text()
     check("tracker_still_calls_cpu_nms", "return cpu_nms(dets, thresh)" in wrapper, "no fake detector")
 

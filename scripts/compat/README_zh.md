@@ -1,46 +1,53 @@
-# LAM Blackwell 依赖兼容（离线修复）
+# LAM Blackwell 依赖兼容
 
-上游 `aigc3d/LAM` 固定在 `339573649dd93df4cba8093a964e85a80d1b61f3`。改动只在 fork `zhting/LAM`。没有改追踪器、没有假检测器、没有把 import 当成 GPU 通过。静态头像仍然走 FaceBoxes。
+上游 `aigc3d/LAM` 固定在 `339573649dd93df4cba8093a964e85a80d1b61f3`。只改 fork `zhting/LAM`。追踪器仍走 FaceBoxes 编译出的 `cpu_nms`。没有假检测器，也没有用 CPU 构建代替 GPU 通过。
 
-## 这次实际跑过什么
+## 版本：测过的和只在日志里见过的
 
-本机没有 GPU、没有 nvcc、没有 torch。下面凡是 GPU 的条目都是 **UNTESTED**，不是通过。
-
-| 项目 | G4 实测（RTX PRO 6000 sm_120，Python 3.13.16，torch 2.11.0+cu130） | 本机离线（Python 3.13.18，同一套 NumPy 2.4.6 / Cython 3.0.12 / setuptools 80.10.2） |
-| --- | --- | --- |
-| CUDA matmul | PASS，0.23s | UNTESTED |
-| diff-gaussian-rasterization `8829d14` | 编译 41.4s，前向+反向 PASS | UNTESTED，未重编 |
-| simple-knn `60f461f` | 编译 32.7s，核对距离 PASS | UNTESTED，未重编 |
-| nvdiffrast `22718580` backface-culling | pip 2.6s，得到 `py3-none-any` wheel；随后 JIT 约 39.5s，`import nvdiffrast_plugin` 失败 | 补丁能打上，纯 Python 包装好；剔除代码仍在。CUDA 插件 **UNTESTED** |
-| FaceBoxes CPU NMS | 0.62s 编译失败：`PyArray_Descr` 没有 `subarray` | 同一份旧 `.c` 在这里复现了同一处错误。按当前 NumPy 重新生成后编译 **3.3s**，合成框 NMS **PASS**（0.01s）。GPU NMS 仍 UNTESTED |
-| PyTorch3D `e4ad6e5` | 160s 到点，日志停在 “Building wheel started”。不是编译错误 | **UNTESTED**。没有用 CPU 版冒充 |
-
-G4 的 160 秒是诊断脚本的人为上限，不能当成 PyTorch3D 不兼容。
-
-## 三处修复
-
-1. **nvdiffrast**。`setup.py` 本来就不编译 `.so`，`py3-none-any` 是正常的。插件在第一次 `RasterizeCudaContext` 时由 `torch.utils.cpp_extension.load()` 现编。G4 上 `load()` 返回之后，下一行 `importlib.import_module("nvdiffrast_plugin")` 抛了 `ModuleNotFoundError`。torch 2.11 还会在重编时把扩展改名为 `nvdiffrast_plugin_vN`。补丁保留 `load()` 的返回值，不再按未版本化的名字去 import，也不截获编译异常，也不换一个光栅器。`torch_rasterize.cpp` 里的 `RenderModeFlag_EnableBackfaceCulling` 和 GL 路径的 `glEnable(GL_CULL_FACE)` 都没改。显式设置的 `TORCH_CUDA_ARCH_LIST`（例如 `12.0`）不再被清成空字符串。
-2. **FaceBoxes**。仓库里的 `cpu_nms.c` 是用 NumPy 1 的 Cython 声明生成的，直接访问已删除的 `PyArray_Descr.subarray`。检出时 `.c` 和 `.pyx` 时间戳相同，Cython 会跳过重新生成，所以 G4 在 0.6 秒内就编了这份旧文件。现在构建会删掉旧 `.c` 并强制从 `.pyx` 生成。`.pyx` 里去掉了 NumPy 2 已删除的 `numpy.int` / `int_t`，索引用 `intp`（与 `argsort` 的 dtype 一致）。没有把失败吞掉再改走 `py_cpu_nms`。
-3. **PyTorch3D**。该提交的 `setup.py` 已经带有 CUDA 13 的 `--device-entity-has-hidden-visibility=false` 和 `-static-global-template-stub=false`。单独脚本在持久目录里 `build_ext --inplace`，超时只杀进程、留下 ninja 目标，下次接着编。不要再用 pip 的临时目录，那个目录超时后就没了。
-
-## 时间预算：测过的和估计的
-
-| 阶段 | 测过 | 脚本上限 / 估计 | 说明 |
+| | 第一次 G4 诊断 | 第二次 G4 验证（`d4f1bfc`） | 这次离线修复 |
 | --- | --- | --- | --- |
-| FaceBoxes CPU NMS | **3.3s** 编译成功 | 脚本上限 180s，只是余量 | `FACEBOXES_BUILD_TIMEOUT` |
-| nvdiffrast pip（纯 Python） | G4 **2.6s** | 脚本上限 180s | `NVDIFFRAST_PIP_TIMEOUT` |
-| nvdiffrast CUDA JIT | G4 失败前窗口 **39.5s**，成功值未知 | **建议首次 180s**；缓存命中应更短，未测 | 设 `TORCH_EXTENSIONS_DIR`。180s 不是成功实测 |
-| GS / simple-knn | G4 **41s / 33s** 且 kernel PASS | 沿用单架构 `12.0`，不必加 PTX | 本机未重编 |
-| PyTorch3D | 只测到 **160s 被切断**，成功值未知 | **建议冷编译 1800s**，`MAX_JOBS=4`，只编当前 GPU 的架构 | `PYTORCH3D_BUILD_TIMEOUT`。超时退出码 124，可恢复。31 个 `.cu` + 36 个 `.cpp`。1800s 是估计 |
+| Python | 3.13.16 | 3.13.16 | **3.13.18**（同一 3.13 ABI，补丁版本不同） |
+| torch | **2.11.0+cu130**，插件 import 失败已测 | **2.14.1+cu130**，系统 torch，没有降级 | 本机没有 torch，没有装 |
+| 结论 | matmul、GS、simple-knn 的 kernel PASS | matmul PASS；FaceBoxes CPU NMS PASS；nvdiffrast FAIL；PyTorch3D 3.893s 编译失败 | 复现并修了 ninja 发现和 C++ 标准。CUDA 编译与 kernel **UNTESTED** |
 
-## 以后在 Colab / G4 上的命令
+GS / simple-knn 的 PASS 属于 torch 2.11。torch 换成 2.14.1 之后没有再编，不能沿用。
 
-不要在没有 GPU 的环境里跑下面后半段。权重下载不在本次范围内。checkpoint 是 `3DAIGC/LAM-20K` 的 `step_045500`，直接从 Hugging Face 到运行目录，不要挂 Drive。
+## 第二次 G4 的两个真失败
+
+1. **ninja**。venv 里已经装了 ninja 1.13.2。torch 2.14 的 `is_ninja_available()` 只执行 PATH 上的 `ninja --version`。引导脚本用绝对路径启动 `<venv>/bin/python`，没有 activate，于是 PATH 里没有 `<venv>/bin`。nvdiffrast 在建立 CUDA context 时抛 `Ninja is required`。PyTorch3D 则退回 distutils，日志写明找不到 ninja。
+2. **C++ 标准**。退回 distutils 后的 nvcc 命令带有 `-std=c++17`（`setup.py` 对 host 和 nvcc 都写了 c++17）。torch 2.14 的 ATen 直接 `#error C++20 or later`。3.893 秒是编译错误，不是早先的 160 秒超时。torch 2.14 只有在参数里还没有 `-std=` 时才会自己补 c++20，所以不会盖掉这份写死的 c++17。ninja 找到之后，写进 `build.ninja` 的仍是同一对参数，host 和 nvcc 都会中招。
+
+## 修复
+
+- `lam_runtime.py` 装进 venv 的 `.pth`。绝对路径启动解释器时就会按 `sys.executable` 所在目录、`sysconfig` scripts、`ninja.BIN_DIR` 找到 ninja，跑一次 `--version`，再把该目录放进本进程的 `PATH`。子进程（ninja、以及 Python 直接拉起的编译器）继承这份环境。找不到可执行文件就抛错。
+- nvdiffrast `22718580` 补丁仍保留 `load()` 的返回值、背面剔除（`RenderModeFlag_EnableBackfaceCulling` 与 `glEnable(GL_CULL_FACE)`）和不清空 `TORCH_CUDA_ARCH_LIST`。编译前同样要求能跑到 ninja。
+- PyTorch3D `e4ad6e5` 的补丁把 host 的 `-std=c++17` 和 nvcc 的 `-std=c++17` 都改成 c++20，并保留 CUDA 13 的 visibility 开关。构建脚本在 checkout 之后重新打补丁；若 `setup.py` 里还剩 c++17 就失败退出。直接由 Python 拉起的编译命令还会把 c++14/17 收成单一的 c++20，避免 nvcc 收到两个 `-std`。ninja 自己 exec 绝对路径 nvcc 时靠的是 setup.py 里的参数，不是 PATH 包装。
+
+## 这次离线实测
+
+- 不 activate、PATH 只有 `/usr/bin:/bin`、用绝对路径启动 venv Python：`ninja` 是 `FileNotFoundError`。加上 runtime hook 之后版本是 `1.13.2`，子进程 PATH 含 `<venv>/bin`。`.pth` 在没有 `PYTHONPATH` 时同样生效。
+- 用 G4 那条 nvcc 命令做参数改写：`-std=c++17` 变成 `-std=c++20`，CUDA 13 的 visibility 开关还在，只留一个 `-std`。本机没有 nvcc，**没有执行 nvcc**。
+- 本机 `c++ -std=c++17` 经改写后真的编过一个要求 `__cplusplus >= 202002L` 的对象文件，**PASS**。
+- FaceBoxes 合成框 CPU NMS 仍是 **PASS**，`[0, 2]`。
+- PyTorch3D 与 nvdiffrast CUDA 插件没有在本机编译。
+
+## 预算
+
+| 阶段 | 已测 | 未测完的建议 |
+| --- | --- | --- |
+| FaceBoxes CPU NMS | 离线编译 3.3s；第二次 G4 功能 PASS | 脚本上限 180s |
+| nvdiffrast 纯 Python 包装 | 第一次 G4 2.6s | 上限 180s |
+| nvdiffrast CUDA JIT | 2.11 上失败前 39.5s；2.14.1 上还没编过 | 首次建议 180s，缓存目录 `TORCH_EXTENSIONS_DIR` |
+| PyTorch3D | 2.14.1 上 **3.893s 编译失败**；更早的 160s 只是超时 | 修好标准后冷编译仍建议 1800s，`MAX_JOBS=4`，超时 124 可续编 |
+
+## 下次在真卡上
+
+不要在这台没有 GPU 的机器上自动重跑。权重 `3DAIGC/LAM-20K` 的 `step_045500` 仍然不在这次范围内。
 
 ```bash
 git clone https://github.com/zhting/LAM.git
 cd LAM
-git checkout <含 scripts/compat 的本分支>
+git checkout <本分支>
 export LAM_REUSE_SYSTEM_TORCH=1
 export TORCH_CUDA_ARCH_LIST=12.0
 export NVDIFFRAST_VERBOSE=1
@@ -49,25 +56,8 @@ export LAM_COMPAT_CACHE=/content/lam-cache
 export TORCH_EXTENSIONS_DIR=/content/lam-cache/torch_extensions
 export PYTORCH3D_BUILD_TIMEOUT=1800
 bash scripts/compat/bootstrap_blackwell.sh
-python scripts/compat/tests/run_cuda_kernel_suite.py --out /content/lam-cache/cuda_kernel_results.json
+/content/lam_verify/venv/bin/python scripts/compat/tests/run_cuda_kernel_suite.py \
+  --out /content/lam-cache/cuda_kernel_results.json
 ```
 
-确认 JSON 里 `nvdiffrast_backface_culling` 是 `PASS` 且 `back_pixels` 为 0、`front_pixels` 大于 0。在那之前它仍是 UNTESTED。
-
-权重（另一次、需要网络，本次不要自动执行）：
-
-```bash
-huggingface-cli download 3DAIGC/LAM-20K \
-  --local-dir ./model_zoo/lam_models/releases/lam/lam-20k/step_045500/
-```
-
-不要 `pip install torch==2.3.0` 的 cu121 轮子，那个构建不覆盖 sm_120。也不要在 Python 3.13 上使用仓库根目录 `requirements.txt` 里的 `numpy==1.23.0`（没有 cp313 wheel）。本栈的 pin 在 `scripts/compat/constraints-blackwell-cu130.txt`。torch 沿用系统里的 `2.11.0+cu130`，不要装进基础环境。
-
-## 风险
-
-- nvdiffrast 的 CUDA 插件和背面剔除还没在真卡上跑通。39 秒只说明编译阶段跑过并在 import 处失败；nvcc 13 / sm_120 仍可能在 `load()` 内部报错。补丁不会把这个错误藏掉。`NVDIFFRAST_VERBOSE=1` 时编译日志会打出来。
-- PyTorch3D 冷编译时间没测完。1800 秒是估计。CUDA 13 的 CUB 若没被自动找到，脚本会在存在 `cub/cub.cuh` 时设置 `CUB_HOME`；找不到就会让编译失败，而不是悄悄装一个只有 CPU 的包。
-- 离线解释器是 Python 3.13.18，G4 是 3.13.16。ABI 同为 3.13，补丁版本不同。
-- xformers、完整 LAM import、FLAME 拟合、照片推理都没跑。FLAME 许可已经处理过，这里没有重新注册。
-- FaceBoxes 只编了 CPU NMS。检测器包装本来就只调 `cpu_nms`。
-- 旧的 `requirements.txt`（tensorflow 2.12、numpy 1.23 等）和这条 Blackwell 路径不是同一套环境。
+内核套件要用 venv 解释器的绝对路径，不必先 activate。通过标准仍是正面像素大于 0、背面像素为 0。在那之前 CUDA 结果保持 UNTESTED。不要改用 torch 2.3/cu121，也不要在 Python 3.13 上安装根目录 `requirements.txt` 里的 `numpy==1.23.0`。

@@ -16,6 +16,7 @@ if [[ -n "${LAM_VENV:-}" && -x "$LAM_VENV/bin/python" ]]; then
 fi
 TIMEOUT=${PYTORCH3D_BUILD_TIMEOUT:-1800}
 MAX_JOBS=${MAX_JOBS:-4}
+export PYTHONPATH="$ROOT/scripts/compat${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$REPORT" "$CACHE/src"
 
 RESULT="$REPORT/pytorch3d_build.json"
@@ -31,7 +32,9 @@ doc = {
     "kernel": "UNTESTED",
     "measured_g4_timeout_seconds": 160.004,
     "measured_g4_result": "BUILD_TIMEOUT",
-    "measured_g4_note": "pip was still at 'Building wheel for pytorch3d: started'. Not a compiler error. The ephemeral pip temp dir was not resumable.",
+    "measured_g4_note": "2026-11-06 160s cap was an artificial timeout. 2026-11-07 on torch 2.14.1+cu130 the build failed in 3.893s because setup.py passed -std=c++17 and ATen requires C++20.",
+    "measured_g4_cpp_failure_seconds": 3.893,
+    "measured_g4_cpp_failure_torch": "2.14.1+cu130",
     "proposed_cold_budget_seconds": 1800,
     "proposed_budget_basis": "31 .cu + 36 .cpp translation units, one CUDA arch, ninja, persistent tree. Estimate, not a completed measurement.",
     "tested_successful_build_seconds": None,
@@ -96,6 +99,18 @@ fi
 git -C "$SRC" fetch --filter=blob:none origin "$COMMIT" || true
 git -C "$SRC" checkout --force "$COMMIT"
 # Do not git-clean: build/ and *.o are the resume cache.
+# checkout restores upstream -std=c++17. Re-apply the C++20 patch every time.
+patch -p1 --forward --batch --directory "$SRC" \
+  < "$ROOT/scripts/compat/patches/pytorch3d-e4ad6e5-cpp20.patch"
+if grep -n -- '-std=c++17' "$SRC/setup.py"; then
+  echo "pytorch3d setup.py still requests -std=c++17" >&2
+  exit 1
+fi
+grep -n -- '-std=c++20' "$SRC/setup.py" >"$REPORT/pytorch3d_std_flags.txt"
+# Fail here if the absolute venv interpreter cannot run ninja. Do not fall
+# through into distutils, which hides the missing executable and then compiles
+# with the wrong standard.
+"$PY" -c 'import lam_runtime; print(lam_runtime.require_ninja())' >"$REPORT/pytorch3d_ninja.txt"
 
 "$PY" -m pip install -c "$ROOT/scripts/compat/constraints-blackwell-cu130.txt" \
   'iopath==0.1.10' 'fvcore==0.1.5.post20221221' \
