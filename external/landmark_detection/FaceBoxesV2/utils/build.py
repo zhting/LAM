@@ -34,6 +34,15 @@ except AttributeError:
 
 # run the customize_compiler
 class custom_build_ext(build_ext):
+    def finalize_options(self):
+        build_ext.finalize_options(self)
+        # Cython skips regeneration when cpu_nms.c is not older than the
+        # .pyx. A checkout gives them the same timestamp, so the NumPy 1
+        # generated file (PyArray_Descr.subarray) was compiled as-is and
+        # failed on NumPy 2.4.6. Always regenerate against this interpreter's
+        # NumPy pxd. Compiler errors are not swallowed.
+        self.force = True
+
     def build_extensions(self):
         # customize_compiler_for_nvcc(self.compiler)
         build_ext.build_extensions(self)

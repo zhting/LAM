@@ -1,0 +1,123 @@
+diff --git a/nvdiffrast/torch/ops.py b/nvdiffrast/torch/ops.py
+index f366c02..9dab080 100644
+--- a/nvdiffrast/torch/ops.py
++++ b/nvdiffrast/torch/ops.py
+@@ -10,9 +10,69 @@ import importlib
+ import logging
+ import numpy as np
+ import os
++import sys
+ import torch
+ import torch.utils.cpp_extension
+ 
++def _ensure_ninja_on_subprocess_path():
++    # LAM_COMPAT_NINJA: torch 2.14 is_ninja_available() executes ['ninja', '--version']
++    # using PATH. G4 installed ninja 1.13.2 into the venv, then launched
++    # <venv>/bin/python by absolute path without activation, so PATH did not
++    # contain <venv>/bin and load() raised 'Ninja is required'. Publish the
++    # absolute executable for this process and every child. A missing binary
++    # still raises; compiler failures are not caught.
++    import shutil
++    import subprocess
++    import sysconfig
++    try:
++        import lam_runtime
++    except ImportError:
++        lam_runtime = None
++    if lam_runtime is not None:
++        return lam_runtime.require_ninja()
++    names = ['ninja.exe', 'ninja'] if os.name == 'nt' else ['ninja']
++    directories = [os.path.dirname(os.path.realpath(sys.executable))]
++    scripts = sysconfig.get_path('scripts')
++    if scripts:
++        directories.append(scripts)
++    try:
++        import ninja as ninja_dist
++    except ImportError:
++        ninja_dist = None
++    if ninja_dist is not None and getattr(ninja_dist, 'BIN_DIR', None):
++        directories.append(str(ninja_dist.BIN_DIR))
++    candidates = []
++    pinned = os.environ.get('LAM_NINJA', '').strip()
++    if pinned:
++        candidates.append(pinned)
++    for directory in directories:
++        for name in names:
++            candidates.append(os.path.join(directory, name))
++    found = shutil.which('ninja')
++    if found:
++        candidates.append(found)
++    tried = []
++    for candidate in candidates:
++        if not candidate or candidate in tried:
++            continue
++        tried.append(candidate)
++        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
++            continue
++        try:
++            subprocess.check_output([candidate, '--version'], stderr=subprocess.STDOUT)
++        except (OSError, subprocess.CalledProcessError):
++            continue
++        folder = os.path.dirname(os.path.abspath(candidate))
++        current = os.environ.get('PATH', '')
++        if folder not in current.split(os.pathsep):
++            os.environ['PATH'] = folder + (os.pathsep + current if current else '')
++        os.environ['LAM_NINJA'] = os.path.abspath(candidate)
++        return os.environ['LAM_NINJA']
++    raise RuntimeError(
++        'Ninja is required to compile the backface-culling CUDA plugin, but no executable could be run. '
++        'Python: %s. Searched: %s. PATH: %s' % (sys.executable, tried, os.environ.get('PATH', '')))
++
++
+ #----------------------------------------------------------------------------
+ # C++/Cuda plugin compiler/loader.
+ 
+@@ -90,8 +150,12 @@ def _get_plugin(gl=False):
+             'torch_antialias.cpp',
+         ]
+ 
+-    # Some containers set this to contain old architectures that won't compile. We only need the one installed in the machine.
+-    os.environ['TORCH_CUDA_ARCH_LIST'] = ''
++    # LAM_COMPAT_PLUGIN_LOAD: keep an explicit TORCH_CUDA_ARCH_LIST.
++    # Clearing it discarded a caller pin such as 12.0 (Blackwell sm_120) and
++    # made PyTorch autodetect, which also appends +PTX and lengthens the JIT
++    # compile. An empty value is removed so PyTorch can see the visible GPU.
++    if not os.environ.get('TORCH_CUDA_ARCH_LIST', '').strip():
++        os.environ.pop('TORCH_CUDA_ARCH_LIST', None)
+ 
+     # On Linux, show a warning if GLEW is being forcibly loaded when compiling the GL plugin.
+     if gl and (os.name == 'posix') and ('libGLEW' in os.environ.get('LD_PRELOAD', '')):
+@@ -121,11 +185,29 @@ def _get_plugin(gl=False):
+             pass
+ 
+     # Compile and load.
++    # LAM_COMPAT_PLUGIN_LOAD: on torch 2.11.0+cu130 the G4 run reached this
++    # import and raised ModuleNotFoundError: nvdiffrast_plugin after load()
++    # had returned (about 39s, so nvcc had run). torch 2.11 _jit_compile
++    # returns that module object. When ExtensionVersioner bumps past 0 it
++    # also renames the extension to "<name>_vN", which import_module() of
++    # the unversioned plugin_name cannot see. Keep the returned module.
++    # Compiler and loader exceptions propagate; there is no fallback rasterizer.
+     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
+-    torch.utils.cpp_extension.load(name=plugin_name, sources=source_paths, extra_cflags=common_opts+cc_opts, extra_cuda_cflags=common_opts+['-lineinfo'], extra_ldflags=ldflags, with_cuda=True, verbose=False)
+-
+-    # Import, cache, and return the compiled module.
+-    _cached_plugin[gl] = importlib.import_module(plugin_name)
++    _ensure_ninja_on_subprocess_path()
++    verbose_env = os.environ.get('NVDIFFRAST_VERBOSE', '')
++    verbose = verbose_env.strip().lower() in ('1', 'true', 'yes')
++    module = torch.utils.cpp_extension.load(name=plugin_name, sources=source_paths, extra_cflags=common_opts+cc_opts, extra_cuda_cflags=common_opts+['-lineinfo'], extra_ldflags=ldflags, with_cuda=True, verbose=verbose)
++    if module is None:
++        module = importlib.import_module(plugin_name)
++    else:
++        sys.modules[plugin_name] = module
++    required = 'RasterizeGLStateWrapper' if gl else 'RasterizeCRStateWrapper'
++    if not hasattr(module, required):
++        raise RuntimeError(
++            'nvdiffrast plugin %s has no %s after compilation. '
++            'Refusing to continue without the backface-culling CUDA plugin.'
++            % (plugin_name, required))
++    _cached_plugin[gl] = module
+     return _cached_plugin[gl]
+ 
+ #----------------------------------------------------------------------------
