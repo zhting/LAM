@@ -31,6 +31,8 @@ def main() -> None:
     add("constraints_match_plan", pins == [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")], str(len(pins)))
     add("no_numpy_downgrade_pin", not any(pin.startswith("numpy==1.") for pin in pins), "numpy")
     add("moviepy_stays_on_1", "moviepy==1.0.3" in pins, "moviepy.editor")
+    add("decorator_below_5", "decorator==4.4.2" in pins and "decorator==5.1.1" not in pins, "moviepy<5")
+    add("diffusers_matches_hub_line", import_plan.DIFFUSERS_PIN == "0.32.2", import_plan.DIFFUSERS_PIN)
 
     smoke = (ROOT / "scripts" / "compat" / "tests" / "smoke_full_imports.py").read_text()
     tree = ast.parse(smoke)

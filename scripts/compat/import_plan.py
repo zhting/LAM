@@ -16,6 +16,11 @@ import sys
 # xformers-0.0.35 is tagged py39-none; its _C.so links libtorch_cuda and
 # libcudart.so.13 and does not link libpython, so cp313 can load it.
 # There is no separate cp313 xformers build. Do not compile xformers.
+ACCELERATE_PIN = "1.15.0"
+# 0.32.2 still exports diffusers.utils.is_torch_version and accepts
+# huggingface-hub 0.26.5 plus safetensors 0.4.5. 0.42.1 requires both newer.
+DIFFUSERS_PIN = "0.32.2"
+
 PAIRS = {
     "2.14.1+cu130": {
         "torchvision": "0.29.1+cu130",
@@ -73,8 +78,8 @@ def main() -> None:
         "pair": pair,
         "pure_pins": pure_pins(),
         "no_deps": ["torchvision", "xformers", "accelerate", "diffusers"],
-        "accelerate": "1.15.0",
-        "diffusers": "0.42.1",
+        "accelerate": ACCELERATE_PIN,
+        "diffusers": DIFFUSERS_PIN,
         "pymcubes": {
             "spec": "pymcubes==0.1.6",
             "wheel_cp313": False,

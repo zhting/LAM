@@ -32,6 +32,8 @@ print(f"numpy=={numpy.__version__}")
 PY
 
 echo "import stage torch=$BEFORE torchvision=$TV xformers=$XF cap=${TIMEOUT}s"
+"$PY" "$ROOT/scripts/compat/preflight_imports.py" --report "$REPORT/import_preflight.json"
+
 # Pure wheels first. The constraint blocks a silent torch or numpy replacement.
 timeout --foreground "$TIMEOUT" "$PY" -m pip install --upgrade-strategy only-if-needed \
   -c "$REPORT/import_constraints.txt" \
@@ -80,6 +82,15 @@ AFTER=$("$PY" -c 'import torch; print(torch.__version__)')
 if [[ "$AFTER" != "$BEFORE" ]]; then
   echo "FAIL_EARLY: torch changed from $BEFORE to $AFTER" >&2
   exit 3
+fi
+set +e
+"$PY" -m pip check >"$REPORT/import_pip_check.log" 2>&1
+CHECK_RC=$?
+set -e
+echo "pip_check_rc=$CHECK_RC" | tee "$REPORT/import_pip_check_status.txt"
+if [[ "$CHECK_RC" -ne 0 ]]; then
+  echo "FAIL_EARLY: pip check reported unsatisfied requirements. See $REPORT/import_pip_check.log" >&2
+  exit 4
 fi
 echo "torch_unchanged $AFTER"
 echo "import bootstrap done"
