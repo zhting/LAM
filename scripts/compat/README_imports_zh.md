@@ -30,7 +30,8 @@
 
 ```bash
 cd /path/to/LAM
-git checkout <下面报告里的新 SHA>
+git fetch origin cursor/lam-blackwell-deps-9075
+git checkout cursor/lam-blackwell-deps-9075
 export LAM_VENV=/content/lam_verify/venv
 export LAM_COMPAT_CACHE=/content/lam_verify/cache
 export LAM_REPORT_DIR=/content/lam_verify/report
