@@ -10,7 +10,7 @@
 | torch | **2.11.0+cu130**，插件 import 失败已测 | **2.14.1+cu130**，系统 torch，没有降级 | 本机没有 torch，没有装 |
 | 结论 | matmul、GS、simple-knn 的 kernel PASS | matmul PASS；FaceBoxes CPU NMS PASS；nvdiffrast FAIL；PyTorch3D 3.893s 编译失败 | 复现并修了 ninja 发现和 C++ 标准。CUDA 编译与 kernel **UNTESTED** |
 
-GS / simple-knn 的 PASS 属于 torch 2.11。torch 换成 2.14.1 之后没有再编，不能沿用。
+随后在头 `8c5a04f`、torch 2.14.1+cu130 上，六个依赖内核（含 GS、simple-knn、nvdiffrast 正面 72 / 背面 0、PyTorch3D 编译 241.875s）已经通过。那不是完整模型导入或推理。无权重导入检查见 `scripts/compat/README_imports_zh.md`。
 
 ## 第二次 G4 的两个真失败
 
